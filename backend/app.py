@@ -201,6 +201,90 @@ def generate_training_report(workspace_id, df, target_column, algorithm, metrics
         logger.exception("Error generating report")
         return None
 
+def update_knowledge_base_with_dataset(df, target_column, workspace_id):
+    """Extract knowledge from uploaded dataset and add to RAG knowledge base."""
+    kb_path = os.path.join(os.getcwd(), 'factual_embeddings.pkl')
+
+    # Load existing knowledge base
+    existing_facts = []
+    if os.path.exists(kb_path):
+        try:
+            with open(kb_path, 'rb') as f:
+                existing_facts = pickle.load(f)
+                if not isinstance(existing_facts, list):
+                    existing_facts = []
+        except Exception:
+            existing_facts = []
+
+    # Extract new facts from dataset
+    new_facts = []
+
+    # Get unique target values (diseases/conditions)
+    if target_column in df.columns:
+        unique_targets = df[target_column].unique()
+
+        for target in unique_targets:
+            if pd.isna(target):
+                continue
+
+            target_str = str(target).strip()
+            if not target_str:
+                continue
+
+            # Get rows for this target
+            target_rows = df[df[target_column] == target]
+
+            # Analyze feature patterns
+            feature_columns = [c for c in df.columns if c != target_column]
+
+            # Find most common symptoms for this condition
+            symptom_counts = {}
+            for col in feature_columns:
+                if target_rows[col].dtype in ['int64', 'float64']:
+                    # Binary features
+                    positive_count = (target_rows[col] > 0).sum()
+                    if positive_count > len(target_rows) * 0.3:  # Present in >30% of cases
+                        symptom_counts[col] = positive_count
+                elif target_rows[col].dtype == 'object':
+                    # Categorical features - get most common values
+                    value_counts = target_rows[col].value_counts()
+                    if len(value_counts) > 0:
+                        most_common = value_counts.index[0]
+                        count = value_counts.iloc[0]
+                        if count > len(target_rows) * 0.3:
+                            symptom_counts[f"{col}={most_common}"] = count
+
+            # Create fact about this condition
+            if symptom_counts:
+                top_symptoms = sorted(symptom_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+                symptom_names = [name.split('=')[0] for name, _ in top_symptoms]
+                fact = f"{target_str}: commonly associated with {', '.join(symptom_names)}"
+                new_facts.append(fact)
+
+            # Add dataset-specific insights
+            fact = f"Dataset analysis for {target_str}: found in {len(target_rows)} cases out of {len(df)} total samples"
+            new_facts.append(fact)
+
+    # Add workspace context
+    if workspace_id:
+        new_facts.append(f"Workspace {workspace_id}: custom dataset with {len(df)} samples, target column '{target_column}'")
+
+    # Combine and save
+    all_facts = existing_facts + new_facts
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_facts = []
+    for fact in all_facts:
+        if fact not in seen:
+            seen.add(fact)
+            unique_facts.append(fact)
+
+    with open(kb_path, 'wb') as f:
+        pickle.dump(unique_facts, f)
+
+    logger.info(f"Updated knowledge base with {len(new_facts)} new facts from uploaded dataset")
+
 def get_db_connection(db_path: str):
     conn = sqlite3.connect(db_path)
     return conn
@@ -490,6 +574,11 @@ def upload_dataset():
         if target_column not in df.columns:
             return jsonify({"error": f"Target column '{target_column}' not found in uploaded dataset columns: {list(df.columns)}"}), 400
 
+        # Validate dataset size for reliable evaluation
+        min_samples = 50
+        if len(df) < min_samples:
+            return jsonify({"error": f"Dataset too small for reliable training. Minimum {min_samples} samples required, but got {len(df)}. Please upload a larger dataset."}), 400
+
         with progress_lock:
             training_progress[workspace_id].update({"progress": 40, "message": "Preprocessing data..."})
 
@@ -502,7 +591,11 @@ def upload_dataset():
         X_processed = pd.get_dummies(X, drop_first=True)
         training_columns = list(X_processed.columns)
 
-        X_train, X_test, y_train, y_test = train_test_split(X_processed, y, test_size=0.2, random_state=42)
+        # Ensure minimum test set size for reliable evaluation
+        min_test_size = max(10, int(len(df) * 0.2))  # At least 10 samples or 20%, whichever is larger
+        test_size = min(0.3, max(0.2, min_test_size / len(df)))  # Cap at 30% to leave enough for training
+
+        X_train, X_test, y_train, y_test = train_test_split(X_processed, y, test_size=test_size, random_state=42)
 
         # ---- Training ----
         from sklearn.metrics import accuracy_score, f1_score, mean_squared_error, r2_score
@@ -658,6 +751,12 @@ def upload_dataset():
                     f.write(f"  - {item}\n")
         except Exception:
             pass
+
+        # Update knowledge base with uploaded dataset for RAG
+        try:
+            update_knowledge_base_with_dataset(df, target_column, workspace_id)
+        except Exception as e:
+            logger.warning(f"Failed to update knowledge base: {e}")
 
         with progress_lock:
             training_progress[workspace_id].update({"progress": 100, "message": "Training complete!", "status": "done"})
@@ -1203,22 +1302,238 @@ def list_feedback():
     finally:
         conn.close()
 
+def handle_domain_specific_query(domain, message, text):
+    """Handle domain-specific queries using specialized logic and RAG."""
+    kb_path = os.path.join(os.getcwd(), 'factual_embeddings.pkl')
+
+    # Load knowledge base
+    facts = []
+    if os.path.exists(kb_path):
+        try:
+            with open(kb_path, 'rb') as f:
+                facts = pickle.load(f)
+            if not isinstance(facts, list):
+                facts = []
+        except Exception:
+            facts = []
+
+    query_lower = text.lower()
+
+    # Domain-specific query patterns and responses
+    if domain == 'medications':
+        # Simple approach: extract disease names from query and look up in medications.csv
+        import pandas as pd
+
+        try:
+            # Load medications data
+            med_df = pd.read_csv(os.path.join(os.getcwd(), 'datasets', 'medications.csv'))
+
+            # Extract potential disease names from the query
+            query_words = set(query_lower.split())
+
+            # Find diseases that match any word in the query
+            matching_diseases = []
+            for _, row in med_df.iterrows():
+                disease_name = str(row['Disease']).lower().strip()
+                disease_words = set(disease_name.split())
+
+                # Check if any word from the disease name appears in the query
+                if disease_words & query_words:  # Set intersection
+                    matching_diseases.append((row['Disease'], row['Medication']))
+
+            if matching_diseases:
+                # Return data for the first matching disease
+                disease_name, medication_data = matching_diseases[0]
+                response = f"**{disease_name}**\n\nMedication: {medication_data}\n\n⚠️ Always consult a doctor before taking any medication. This is general information only."
+                return response
+            else:
+                # No matching disease found
+                return "I couldn't find specific medication information for the mentioned condition. Please consult a healthcare professional for appropriate medication recommendations."
+
+        except Exception as e:
+            logger.error(f"Error in medications domain: {e}")
+            return "Sorry, I encountered an error while looking up medication information. Please try again."
+
+    elif domain == 'diet':
+        # Check for diet-related queries
+        diet_patterns = [
+            r"(recommend|suggest|give).*(diet|food|nutrition|eat|meal)",
+            r"(what|which).*(diet|food|eat|nutrition)",
+            r"(should i eat|can i eat|diet for)",
+            r"(healthy|nutrition|meal).*(plan|recommendation)"
+        ]
+
+        # Debug logging
+        logger.info(f"[Diet Domain] Query: '{query_lower}', Domain: {domain}")
+
+        if any(re.search(pattern, query_lower) for pattern in diet_patterns):
+            logger.info(f"[Diet Domain] Pattern matched for query: '{query_lower}'")
+            # Extract disease mentions - expanded list
+            disease_keywords = [
+                'diabetes', 'hypertension', 'heart', 'cancer', 'obesity', 'arthritis', 'thyroid',
+                'asthma', 'depression', 'anxiety', 'flu', 'infection', 'pain', 'fever', 'cough',
+                'headache', 'migraine', 'pregnancy', 'pancreatitis', 'vaginitis', 'panic disorder'
+            ]
+
+            mentioned_conditions = []
+            for condition in disease_keywords:
+                if condition in query_lower:
+                    mentioned_conditions.append(condition)
+
+            # Find diet facts specifically for mentioned conditions
+            relevant_diet_facts = []
+            if mentioned_conditions:
+                for condition in mentioned_conditions:
+                    # Look for facts that contain both the condition and "diet"
+                    condition_facts = [f for f in facts if condition.lower() in f.lower() and 'diet' in f.lower()]
+                    relevant_diet_facts.extend(condition_facts)
+                    logger.info(f"[Diet Domain] Condition: '{condition}', Found {len(condition_facts)} diet facts")
+            else:
+                logger.info(f"[Diet Domain] No conditions mentioned in query: '{query_lower}'")
+
+            if mentioned_conditions and relevant_diet_facts:
+                response = f"For {', '.join(mentioned_conditions)}, here are dietary recommendations:\n\n"
+                for i, fact in enumerate(relevant_diet_facts[:3], 1):
+                    # Clean up the fact text (remove the "X diet recommendations:" prefix if present)
+                    clean_fact = fact.split(': ', 1)[-1] if ': ' in fact else fact
+                    response += f"{i}. {clean_fact}\n"
+            else:
+                # Provide general healthy eating advice when specific disease info isn't available
+                if mentioned_conditions:
+                    response = f"For {', '.join(mentioned_conditions)}, here are general healthy eating recommendations:\n\n"
+                else:
+                    response = "Here are general healthy diet recommendations:\n\n"
+
+                response += "• Eat a balanced diet with plenty of vegetables, fruits, and whole grains\n"
+                response += "• Choose lean proteins like fish, poultry, beans, and nuts\n"
+                response += "• Limit processed foods, sugary drinks, and excessive salt\n"
+                response += "• Stay hydrated by drinking plenty of water throughout the day\n"
+                response += "• Consider portion control and mindful eating habits\n"
+                response += "• Consult a registered dietitian for personalized nutrition advice\n"
+
+            response += "\n🥗 Remember to consult a registered dietitian for personalized nutrition advice."
+            return response
+
+    elif domain == 'workout':
+        # Check for workout-related queries
+        workout_patterns = [
+            r"(recommend|suggest|give).*(exercise|workout|fitness|training)",
+            r"(what|which).*(exercise|workout|activity|training)",
+            r"(can i do|should i do|safe).*(exercise|workout)",
+            r"(physical|fitness).*(activity|routine|plan)"
+        ]
+
+        if any(re.search(pattern, query_lower) for pattern in workout_patterns):
+            # Extract condition mentions - expanded list
+            condition_keywords = [
+                'heart', 'arthritis', 'diabetes', 'asthma', 'back pain', 'pregnancy', 'elderly',
+                'hypertension', 'cancer', 'obesity', 'thyroid', 'depression', 'anxiety', 'pain',
+                'fever', 'cough', 'headache', 'migraine', 'pancreatitis', 'vaginitis', 'panic disorder'
+            ]
+
+            mentioned_conditions = []
+            for condition in condition_keywords:
+                if condition in query_lower:
+                    mentioned_conditions.append(condition)
+
+            # Find workout facts specifically for mentioned conditions
+            relevant_workout_facts = []
+            if mentioned_conditions:
+                for condition in mentioned_conditions:
+                    # Look for facts that contain both the condition and workout-related terms
+                    condition_facts = [f for f in facts if condition.lower() in f.lower() and
+                                     ('workout' in f.lower() or 'exercise' in f.lower() or 'fitness' in f.lower())]
+                    relevant_workout_facts.extend(condition_facts)
+
+            if mentioned_conditions and relevant_workout_facts:
+                response = f"For {', '.join(mentioned_conditions)}, here are safe exercise recommendations:\n\n"
+                for i, fact in enumerate(relevant_workout_facts[:3], 1):
+                    # Clean up the fact text (remove the "X workout recommendations:" prefix if present)
+                    clean_fact = fact.split(': ', 1)[-1] if ': ' in fact else fact
+                    response += f"{i}. {clean_fact}\n"
+            else:
+                response = "Here are general exercise and workout recommendations:\n\n"
+                response += "• Start with low-impact activities like walking or swimming\n"
+                response += "• Include both cardio and strength training\n"
+                response += "• Listen to your body and stop if you feel pain\n"
+
+            response += "\n💪 Always consult your doctor before starting a new exercise program, especially with health conditions."
+            return response
+
+    elif domain == 'precautions':
+        # Check for precaution-related queries
+        prec_patterns = [
+            r"(precaution|prevention|prevent|avoid|risk|safety)",
+            r"(how to|what should|what can).*(prevent|avoid|protect)",
+            r"(safety|warning|caution|careful)"
+        ]
+
+        if any(re.search(pattern, query_lower) for pattern in prec_patterns):
+            # Extract condition mentions - expanded list
+            condition_keywords = [
+                'infection', 'flu', 'covid', 'diabetes', 'heart', 'cancer', 'injury',
+                'hypertension', 'asthma', 'arthritis', 'depression', 'anxiety', 'pain',
+                'fever', 'cough', 'headache', 'migraine', 'pregnancy', 'pancreatitis',
+                'vaginitis', 'panic disorder', 'thyroid', 'obesity'
+            ]
+
+            mentioned_conditions = []
+            for condition in condition_keywords:
+                if condition in query_lower:
+                    mentioned_conditions.append(condition)
+
+            # Find precaution facts specifically for mentioned conditions
+            relevant_prec_facts = []
+            if mentioned_conditions:
+                for condition in mentioned_conditions:
+                    # Look for facts that contain both the condition and precaution-related terms
+                    condition_facts = [f for f in facts if condition.lower() in f.lower() and
+                                     ('precaution' in f.lower() or 'prevention' in f.lower() or 'safety' in f.lower())]
+                    relevant_prec_facts.extend(condition_facts)
+
+            if mentioned_conditions and relevant_prec_facts:
+                response = f"For {', '.join(mentioned_conditions)}, here are important precautions:\n\n"
+                for i, fact in enumerate(relevant_prec_facts[:3], 1):
+                    # Clean up the fact text (remove the "X precautions:" prefix if present)
+                    clean_fact = fact.split(': ', 1)[-1] if ': ' in fact else fact
+                    response += f"{i}. {clean_fact}\n"
+            else:
+                response = "Here are general health and safety precautions:\n\n"
+                response += "• Practice good hygiene and handwashing\n"
+                response += "• Stay up-to-date with vaccinations\n"
+                response += "• Maintain a healthy lifestyle\n"
+
+            response += "\n⚠️ These are general precautions. Consult healthcare professionals for specific medical advice."
+            return response
+
+    # Default domain-specific guidance
+    guidance = {
+        'diet': "I can help with diet recommendations for various health conditions. Try asking: 'What diet should I follow for diabetes?' or 'Healthy eating tips for heart disease'.",
+        'workout': "I can provide exercise recommendations for different health conditions. Ask about: 'Safe exercises for arthritis' or 'Workout plan for hypertension'.",
+        'medications': "I can provide information about medications for various conditions. Try asking: 'What medications for high blood pressure?' or 'Treatment options for diabetes'.",
+        'precautions': "I can help with safety precautions and prevention tips. Ask about: 'How to prevent flu?' or 'Precautions for heart disease'."
+    }
+
+    return guidance.get(domain, "Please ask a question related to this health domain.")
+
 # -----------------------
 # Chatbot endpoint (complete, fixed)
 # -----------------------
 @api_bp.route('/chatbot', methods=['POST'])
 def chatbot():
     """
-    Chatbot with:
+    Domain-aware chatbot with:
     - Small-talk replies for greetings/basic questions
-    - Symptom extraction with normalization and fuzzy/synonym matching
+    - Symptom extraction with normalization and fuzzy/synonym matching (general domain)
     - Optional duration parsing (e.g., 'for 3 days')
-    - Prediction using most recent trained model for the workspace
+    - Prediction using most recent trained model for the workspace (general domain)
+    - Domain-specific RAG responses for diet, workout, medications, precautions
     - Simple RAG over a local factual knowledge base if present
     """
     data = request.get_json(force=True, silent=True) or {}
     message = (data.get('message') or '').strip()
     workspace_id = (data.get('workspace_id') or '').strip()
+    domain = (data.get('domain') or 'general').strip().lower()
 
     if not message:
         return jsonify({"error": "No message provided"}), 400
@@ -1232,240 +1547,297 @@ def chatbot():
     text = re.sub(r"[^\w\s,]", " ", text)  # remove punctuation except commas
     text = re.sub(r"\s+", " ", text).strip()
 
-    # Small-talk triggers
-    smalltalk_map = {
-        r"^(hi|hello|hey|yo|hola|namaste)\b": "Hello! How can I help you today? You can describe your symptoms or ask about your model.",
-        r"how are you\??": "I'm operating normally. How are you feeling today?",
-        r"who are you\??": "I'm your AI health assistant. Describe symptoms like 'headache and jaw pain for 2 days'.",
-        r"help|what can you do": "I can parse your symptoms, match them to your dataset, and predict a likely condition.",
-        r"thank(s| you)\b": "You're welcome! Stay healthy.",
-        r"bye|goodbye|see you": "Goodbye! Take care and feel better soon.",
-    }
-    for pattern, resp in smalltalk_map.items():
-        if re.search(pattern, text):
-            return jsonify({"success": True, "reply": resp})
+    # Domain-specific responses
+    if domain != 'general':
+        domain_response = handle_domain_specific_query(domain, message, text)
+        if domain_response:
+            return jsonify({"success": True, "reply": domain_response})
 
-    try:
-        # If using Rasa NLU (optional)
-        rasa_entities = []
-        if current_app.config.get('USE_RASA_ONLY', False):
-            try:
-                import requests
-                rasa_url = current_app.config.get('RASA_URL', 'http://localhost:5005').rstrip('/') + '/model/parse'
-                rr = requests.post(rasa_url, json={"text": message}, timeout=5)
-                rr.raise_for_status()
-                parsed = rr.json()
-                rasa_entities = parsed.get('entities') or []
-                intent_name = (parsed.get('intent') or {}).get('name') or ''
-                if intent_name in ('greet', 'chitchat', 'smalltalk.greet'):
-                    return jsonify({"success": True, "reply": "Hello! How can I help you today?"})
-                if intent_name in ('bot_challenge', 'who_are_you'):
-                    return jsonify({"success": True, "reply": "I'm your AI health assistant. Describe symptoms like 'headache and jaw pain for 2 days'."})
-            except Exception:
-                return jsonify({"error": "Rasa NLU is unreachable or failed to parse."}), 502
-
-        # Load latest model metadata
-        conn = get_db_connection(current_app.config['DATABASE'])
-        c = conn.cursor()
-        c.execute('''
-            SELECT model_path, training_columns, target_column
-            FROM models
-            WHERE workspace_id = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-        ''', (workspace_id,))
-        row = c.fetchone()
-        conn.close()
-
-        if not row:
-            return jsonify({"error": "No trained model found for this workspace"}), 404
-
-        model_path, training_columns_json, target_column = row
-        training_columns = json.loads(training_columns_json or '[]')
-
-        # Load model
-        with open(model_path, 'rb') as f:
-            model = pickle.load(f)
-
-        # Load dataset file to get raw columns (if available)
-        dataset_files = sorted([
-            f for f in os.listdir(current_app.config['UPLOAD_FOLDER'])
-            if f.endswith('.csv') and workspace_id in f
-        ])
-        df = None
-        if dataset_files:
-            try:
-                df = pd.read_csv(os.path.join(current_app.config['UPLOAD_FOLDER'], dataset_files[-1]))
-            except Exception:
-                df = None
-
-        # Use only raw symptom names (avoid one-hot expanded columns)
-        if df is not None and target_column in df.columns:
-            base_symptoms = [c for c in df.columns if c != target_column]
-        else:
-            base_symptoms = training_columns
-
-        base_symptoms_clean = [re.sub(r'[_\-]', ' ', s.lower()).strip() for s in base_symptoms]
-
-        # Helper: singularize simple plurals
-        def singularize(word: str) -> str:
-            if word.endswith('ies'):
-                return word[:-3] + 'y'
-            elif word.endswith('s') and not word.endswith('ss'):
-                return word[:-1]
-            return word
-
-        synonyms = {
-            'headache': ['head ache', 'head pain', 'migraine', 'head_ache', 'head-ache', 'headaches'],
-            'jaw pain': ['jawpain', 'jaw_pain', 'jaw ache', 'mandible pain'],
-            'fever': ['pyrexia', 'high temperature', 'temp'],
-            'cough': ['coughing'],
-            'sore throat': ['throat pain', 'pharyngitis', 'throat ache'],
+    # Small-talk triggers (only for general domain)
+    if domain == 'general':
+        smalltalk_map = {
+            r"^(hi|hello|hey|yo|hola|namaste)\b": "Hello! How can I help you today? Describe your symptoms like 'headache and jaw pain for 2 days'.",
+            r"how are you\??": "I'm operating normally. How are you feeling today?",
+            r"who are you\??": "I'm your AI health assistant. Describe symptoms like 'headache and jaw pain for 2 days'.",
+            r"help|what can you do": "I can analyze your symptoms and predict possible health conditions. Just describe what you're experiencing.",
+            r"thank(s| you)\b": "You're welcome! Stay healthy.",
+            r"bye|goodbye|see you": "Goodbye! Take care and feel better soon.",
         }
+        for pattern, resp in smalltalk_map.items():
+            if re.search(pattern, text):
+                return jsonify({"success": True, "reply": resp})
+    else:
+        # Domain-specific greetings
+        domain_greetings = {
+            'diet': "Hello! I'm here to help with diet and nutrition recommendations. Tell me about your health condition or dietary needs.",
+            'workout': "Hi! I can provide exercise and workout recommendations. Describe your health condition or fitness goals.",
+            'medications': "Hello! I can help with medication information. Tell me about your symptoms or condition.",
+            'precautions': "Hi! I can provide safety precautions and prevention tips. What health concerns do you have?"
+        }
+        greeting_patterns = [r"^(hi|hello|hey|yo|hola|namaste)\b", r"how are you\??", r"who are you\??", r"help|what can you do"]
+        for pattern in greeting_patterns:
+            if re.search(pattern, text):
+                return jsonify({"success": True, "reply": domain_greetings.get(domain, "Hello! How can I help you today?")})
 
-        def normalize_symptom(token: str) -> str:
-            t = token.strip().lower()
-            t = re.sub(r'[_\-]', ' ', t)
-            t = re.sub(r'\s+', ' ', t).strip()
-            t = singularize(t)
-            for base, syns in synonyms.items():
-                if t == base or t in syns:
-                    return base
-            return t
-
-        # Duration parsing
-        duration_days = None
-        m = re.search(r'(?:for|past|since)\s+(\d{1,3})\s*(day|days|d)\b', text)
-        if m:
-            try:
-                duration_days = int(m.group(1))
-            except Exception:
-                duration_days = None
-
-        # Build candidate symptoms
-        candidate_symptoms = []
-        if current_app.config.get('USE_RASA_ONLY', False) and rasa_entities:
-            for ent in rasa_entities:
-                if (ent.get('entity') or '').lower() == 'symptom':
-                    val = str(ent.get('value') or '').strip()
-                    if val:
-                        candidate_symptoms.append(normalize_symptom(val))
-        else:
-            tokens = re.split(r"[,;\n]|\band\b|\bor\b|\bwith\b|/|\+", text)
-            candidate_symptoms = [normalize_symptom(t) for t in tokens if t.strip()]
-
-        # Initialize detected_map using only base_symptoms
-        detected_map = {s: 0 for s in base_symptoms}
-
-        def ratio(a, b):
-            return SequenceMatcher(None, a, b).ratio()
-
-        # Improved matching: strict threshold + exact/underscore checks
-        for cand in candidate_symptoms:
-            cand = cand.strip().lower()
-            if not cand:
-                continue
-            cand_norm = re.sub(r'[_\-]', ' ', cand).strip()
-            cand_norm = re.sub(r'\s+', ' ', cand_norm)
-            for base_raw, base_clean in zip(base_symptoms, base_symptoms_clean):
-                score = max(
-                    ratio(cand_norm, base_clean),
-                    ratio(cand_norm.replace(' ', ''), base_clean.replace(' ', ''))
-                )
-                if (
-                    score >= 0.8
-                    or cand_norm == base_clean
-                    or cand_norm.replace(' ', '_') == base_clean
-                    or cand_norm.replace('_', ' ') == base_clean
-                ):
-                    detected_map[base_raw] = 1
-
-        # Debug log
-        detected_list = [s for s, v in detected_map.items() if v == 1]
-        logger.info(f"[Chatbot] Message='{message}' -> Detected: {detected_list}")
-
-        # Build input df aligned with training columns (no new get_dummies)
-        user_input_df = pd.DataFrame([detected_map])
-        user_input_df = user_input_df.reindex(columns=training_columns, fill_value=0)
-
-        # Prediction with confidence
+    # Only process symptom prediction for general domain
+    if domain == 'general':
+        logger.info(f"[General Health] Processing query: '{message}'")
         try:
-            prediction = model.predict(user_input_df)[0]
-        except Exception:
-            # fallback with safer try
-            prediction = model.predict(user_input_df)[0]
+            # If using Rasa NLU (optional)
+            rasa_entities = []
+            if current_app.config.get('USE_RASA_ONLY', False):
+                try:
+                    import requests
+                    rasa_url = current_app.config.get('RASA_URL', 'http://localhost:5005').rstrip('/') + '/model/parse'
+                    rr = requests.post(rasa_url, json={"text": message}, timeout=5)
+                    rr.raise_for_status()
+                    parsed = rr.json()
+                    rasa_entities = parsed.get('entities') or []
+                    intent_name = (parsed.get('intent') or {}).get('name') or ''
+                    if intent_name in ('greet', 'chitchat', 'smalltalk.greet'):
+                        return jsonify({"success": True, "reply": "Hello! How can I help you today?"})
+                    if intent_name in ('bot_challenge', 'who_are_you'):
+                        return jsonify({"success": True, "reply": "I'm your AI health assistant. Describe symptoms like 'headache and jaw pain for 2 days'."})
+                except Exception:
+                    return jsonify({"error": "Rasa NLU is unreachable or failed to parse."}), 502
 
-        proba = None
-        if hasattr(model, 'predict_proba'):
+            # Load latest model metadata (workspace-specific or base model)
+            conn = get_db_connection(current_app.config['DATABASE'])
             try:
-                proba_arr = model.predict_proba(user_input_df)
-                if hasattr(model, 'classes_') and len(proba_arr) > 0:
-                    try:
-                        idx = list(model.classes_).index(prediction)
-                        proba = float(proba_arr[0][idx])
-                    except Exception:
-                        proba = float(max(proba_arr[0]))
-            except Exception:
-                proba = None
+                c = conn.cursor()
+                c.execute('''
+                    SELECT model_path, training_columns, target_column
+                    FROM models
+                    WHERE workspace_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ''', (workspace_id,))
+                row = c.fetchone()
+            finally:
+                conn.close()
 
-        # Build reply text
-        if len(detected_list) == 0:
-            prefix = "I didn't confidently match specific symptoms, but based on your input, "
-        elif len(detected_list) == 1:
-            # single symptom prompt
-            single_symptom = detected_list[0]
-            prompt_more = (
-                f"I noticed only one symptom: {single_symptom}. "
-                f"Please share if you have any other symptoms (e.g., fever, cough, nausea) for a more accurate assessment."
-            )
+            # If no workspace model, try to load base model
+            if not row:
+                base_model_path = os.path.join(current_app.config['MODELS_FOLDER'], 'base_health_model.pkl')
+                base_metadata_path = os.path.join(current_app.config['MODELS_FOLDER'], 'base_model_metadata.json')
+                logger.info(f"[General Health] No workspace model found, trying base model at: {base_model_path}")
+
+                if os.path.exists(base_model_path) and os.path.exists(base_metadata_path):
+                    try:
+                        with open(base_metadata_path, 'r') as f:
+                            base_metadata = json.load(f)
+                        model_path = base_model_path
+                        training_columns = base_metadata.get('training_columns', [])
+                        target_column = base_metadata.get('target_column', 'disease')
+                        using_base_model = True
+                        logger.info(f"[General Health] Base model loaded successfully. Columns: {len(training_columns)}")
+                    except Exception as e:
+                        logger.error(f"[General Health] Failed to load base model: {e}")
+                        return jsonify({"error": "No trained model found for this workspace and base model failed to load"}), 404
+                else:
+                    logger.error(f"[General Health] Base model files not found: {base_model_path}")
+                    return jsonify({"error": "No trained model found for this workspace"}), 404
+            else:
+                model_path, training_columns_json, target_column = row
+                training_columns = json.loads(training_columns_json or '[]')
+                using_base_model = False
+
+            # Load model
+            with open(model_path, 'rb') as f:
+                model = pickle.load(f)
+
+            # Load dataset file to get raw columns (if available)
+            dataset_files = sorted([
+                f for f in os.listdir(current_app.config['UPLOAD_FOLDER'])
+                if f.endswith('.csv') and workspace_id in f
+            ])
+            df = None
+            if dataset_files:
+                try:
+                    df = pd.read_csv(os.path.join(current_app.config['UPLOAD_FOLDER'], dataset_files[-1]))
+                except Exception:
+                    df = None
+
+            # Use only raw symptom names (avoid one-hot expanded columns)
+            if df is not None and target_column in df.columns:
+                base_symptoms = [c for c in df.columns if c != target_column]
+            else:
+                # For base model, use the training columns directly as they are the symptom names
+                if using_base_model:
+                    base_symptoms = training_columns
+                else:
+                    base_symptoms = training_columns
+
+            base_symptoms_clean = [re.sub(r'[_\-]', ' ', s.lower()).strip() for s in base_symptoms]
+
+            # Helper: singularize simple plurals
+            def singularize(word: str) -> str:
+                if word.endswith('ies'):
+                    return word[:-3] + 'y'
+                elif word.endswith('s') and not word.endswith('ss'):
+                    return word[:-1]
+                return word
+
+            synonyms = {
+                'headache': ['head ache', 'head pain', 'migraine', 'head_ache', 'head-ache', 'headaches'],
+                'jaw pain': ['jawpain', 'jaw_pain', 'jaw ache', 'mandible pain'],
+                'fever': ['pyrexia', 'high temperature', 'temp'],
+                'cough': ['coughing'],
+                'sore throat': ['throat pain', 'pharyngitis', 'throat ache'],
+            }
+
+            def normalize_symptom(token: str) -> str:
+                t = token.strip().lower()
+                t = re.sub(r'[_\-]', ' ', t)
+                t = re.sub(r'\s+', ' ', t).strip()
+                t = singularize(t)
+                for base, syns in synonyms.items():
+                    if t == base or t in syns:
+                        return base
+                return t
+
+            # Duration parsing
+            duration_days = None
+            m = re.search(r'(?:for|past|since)\s+(\d{1,3})\s*(day|days|d)\b', text)
+            if m:
+                try:
+                    duration_days = int(m.group(1))
+                except Exception:
+                    duration_days = None
+
+            # Build candidate symptoms
+            candidate_symptoms = []
+            if current_app.config.get('USE_RASA_ONLY', False) and rasa_entities:
+                for ent in rasa_entities:
+                    if (ent.get('entity') or '').lower() == 'symptom':
+                        val = str(ent.get('value') or '').strip()
+                        if val:
+                            candidate_symptoms.append(normalize_symptom(val))
+            else:
+                tokens = re.split(r"[,;\n]|\band\b|\bor\b|\bwith\b|/|\+", text)
+                candidate_symptoms = [normalize_symptom(t) for t in tokens if t.strip()]
+
+            # Initialize detected_map using only base_symptoms
+            detected_map = {s: 0 for s in base_symptoms}
+
+            def ratio(a, b):
+                return SequenceMatcher(None, a, b).ratio()
+
+            # Improved matching: strict threshold + exact/underscore checks
+            for cand in candidate_symptoms:
+                cand = cand.strip().lower()
+                if not cand:
+                    continue
+                cand_norm = re.sub(r'[_\-]', ' ', cand).strip()
+                cand_norm = re.sub(r'\s+', ' ', cand_norm)
+                for base_raw, base_clean in zip(base_symptoms, base_symptoms_clean):
+                    score = max(
+                        ratio(cand_norm, base_clean),
+                        ratio(cand_norm.replace(' ', ''), base_clean.replace(' ', ''))
+                    )
+                    if (
+                        score >= 0.8
+                        or cand_norm == base_clean
+                        or cand_norm.replace(' ', '_') == base_clean
+                        or cand_norm.replace('_', ' ') == base_clean
+                    ):
+                        detected_map[base_raw] = 1
+
+            # Debug log
+            detected_list = [s for s, v in detected_map.items() if v == 1]
+            logger.info(f"[General Health] Message='{message}' -> Detected symptoms: {detected_list}")
+            logger.info(f"[General Health] Using base model: {using_base_model}")
+
+            # Build input df aligned with training columns (no new get_dummies)
+            user_input_df = pd.DataFrame([detected_map])
+            user_input_df = user_input_df.reindex(columns=training_columns, fill_value=0)
+
+            # Prediction with confidence
+            try:
+                prediction = model.predict(user_input_df)[0]
+            except Exception:
+                # fallback with safer try
+                prediction = model.predict(user_input_df)[0]
+
+            proba = None
+            if hasattr(model, 'predict_proba'):
+                try:
+                    proba_arr = model.predict_proba(user_input_df)
+                    if hasattr(model, 'classes_') and len(proba_arr) > 0:
+                        try:
+                            idx = list(model.classes_).index(prediction)
+                            proba = float(proba_arr[0][idx])
+                        except Exception:
+                            proba = float(max(proba_arr[0]))
+                except Exception:
+                    proba = None
+
+            # Build reply text
+            if len(detected_list) == 0:
+                prefix = "I didn't confidently match specific symptoms, but based on your input, "
+            elif len(detected_list) == 1:
+                # single symptom prompt
+                single_symptom = detected_list[0]
+                prompt_more = (
+                    f"I noticed only one symptom: {single_symptom}. "
+                    f"Please share if you have any other symptoms (e.g., fever, cough, nausea) for a more accurate assessment."
+                )
+                return jsonify({
+                    "success": True,
+                    "reply": prompt_more,
+                    "detected_symptoms": detected_list,
+                    "duration_days": duration_days,
+                    "need_more_symptoms": True,
+                    "workspace_id": workspace_id
+                })
+            else:
+                if duration_days is not None:
+                    prefix = f"I see you have {', '.join(detected_list)} for the past {duration_days} days. "
+                else:
+                    prefix = f"I see you have {', '.join(detected_list)}. "
+
+            rag_suffix = ''
+            kb_path = os.path.join(os.getcwd(), 'factual_embeddings.pkl')
+            if os.path.exists(kb_path):
+                try:
+                    with open(kb_path, 'rb') as f:
+                        facts = pickle.load(f)
+                    if isinstance(facts, list):
+                        # Find relevant facts for the prediction
+                        relevant_facts = []
+                        prediction_lower = str(prediction).lower()
+                        for fact in facts:
+                            if isinstance(fact, str) and prediction_lower in fact.lower():
+                                relevant_facts.append(fact)
+                                if len(relevant_facts) >= 2:  # Get up to 2 relevant facts
+                                    break
+
+                        if relevant_facts:
+                            # Combine facts intelligently
+                            if len(relevant_facts) == 1:
+                                rag_suffix = f" Note: {relevant_facts[0]}"
+                            else:
+                                # If multiple facts, pick the most informative one
+                                rag_suffix = f" Note: {relevant_facts[0]}"
+                except Exception:
+                    pass
+
+            conf_text_line = f"\nConfidence: {proba*100:.1f}%" if proba is not None else ""
+            disclaimer_line = "\nPlease consult a medical professional for confirmation."
+            reply = f"{prefix}the predicted condition is {prediction}.{rag_suffix}{conf_text_line}{disclaimer_line}"
+
             return jsonify({
                 "success": True,
-                "reply": prompt_more,
+                "reply": reply,
                 "detected_symptoms": detected_list,
                 "duration_days": duration_days,
-                "need_more_symptoms": True,
+                "confidence": proba,
                 "workspace_id": workspace_id
             })
-        else:
-            if duration_days is not None:
-                prefix = f"I see you have {', '.join(detected_list)} for the past {duration_days} days. "
-            else:
-                prefix = f"I see you have {', '.join(detected_list)}. "
 
-        rag_suffix = ''
-        kb_path = os.path.join(os.getcwd(), 'factual_embeddings.pkl')
-        if os.path.exists(kb_path):
-            try:
-                with open(kb_path, 'rb') as f:
-                    kb = pickle.load(f)
-                if isinstance(kb, dict):
-                    facts = []
-                    for k in list(kb.keys())[:200]:
-                        if isinstance(k, str) and str(prediction).lower() in k.lower():
-                            facts.append(k)
-                            if len(facts) >= 1:
-                                break
-                    if facts:
-                        rag_suffix = " Note: " + facts[0]
-            except Exception:
-                pass
-
-        conf_text_line = f"\nConfidence: {proba*100:.1f}%" if proba is not None else ""
-        disclaimer_line = "\nPlease consult a medical professional for confirmation."
-        reply = f"{prefix}the predicted condition is {prediction}.{rag_suffix}{conf_text_line}{disclaimer_line}"
-
-        return jsonify({
-            "success": True,
-            "reply": reply,
-            "detected_symptoms": detected_list,
-            "duration_days": duration_days,
-            "confidence": proba,
-            "workspace_id": workspace_id
-        })
-
-    except Exception as e:
-        logger.exception("Error in /chatbot")
-        return jsonify({"error": str(e)}), 500
+        except Exception as e:
+            logger.exception("Error in /chatbot")
+            return jsonify({"error": str(e)}), 500
 
 # -----------------------
 # Run the app

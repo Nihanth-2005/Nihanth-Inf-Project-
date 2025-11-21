@@ -10,12 +10,22 @@ function Chatbot({ workspaceId }) {
     {
       role: "bot",
       content:
-        "Hello! I'm your AI assistant. How can I help you with your workspace today?",
+        "Hello! I'm your AI health assistant. Select a domain above to get specialized help:\n\n🏥 General Health: Describe symptoms for disease prediction\n🥗 Diet & Nutrition: Get dietary recommendations\n💪 Workouts & Exercise: Safe exercise guidance\n💊 Medications: Treatment information\n⚠️ Precautions: Safety and prevention tips",
     },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [selectedDomain, setSelectedDomain] = useState("general");
+  const [showDomainSelector, setShowDomainSelector] = useState(true);
   const messagesEndRef = useRef(null);
+
+  const domains = [
+    { id: "general", name: "General Health", icon: "🏥", description: "Describe symptoms like 'headache and fever'" },
+    { id: "diet", name: "Diet & Nutrition", icon: "🥗", description: "Ask 'diet for diabetes' or 'healthy eating tips'" },
+    { id: "workout", name: "Workouts & Exercise", icon: "💪", description: "Ask 'safe exercises for arthritis' or 'workout plans'" },
+    { id: "medications", name: "Medications", icon: "💊", description: "Ask 'medicines for hypertension' or 'treatment options'" },
+    { id: "precautions", name: "Precautions", icon: "⚠️", description: "Ask 'how to prevent flu' or 'safety tips'" },
+  ];
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -24,6 +34,11 @@ function Chatbot({ workspaceId }) {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  const handleDomainSelect = (domainId) => {
+    setSelectedDomain(domainId);
+    setShowDomainSelector(false); // Hide selector after selection
+  };
 
   const handleSend = async () => {
     if (!input.trim() || loading) return;
@@ -37,6 +52,7 @@ function Chatbot({ workspaceId }) {
       const response = await axios.post(API_ENDPOINTS.CHATBOT, {
         message: input,
         workspace_id: workspaceId,
+        domain: selectedDomain,
       });
 
       setMessages((prev) => [
@@ -83,16 +99,71 @@ function Chatbot({ workspaceId }) {
           {/* Overlay to ensure text readability */}
           <div className="absolute inset-0 bg-slate-900/40"></div>
 
-          <div className="relative z-10 flex flex-col h-[75vh]">
+          <div className="relative z-10 flex flex-col h-[90vh]">
             {/* Header */}
             <div className="mb-6">
               <h2 className="text-2xl font-bold text-white flex items-center gap-3 mb-2">
                 <MessageSquare className="w-6 h-6 text-blue-400" />
                 AI Health Assistant
               </h2>
-              <p className="text-slate-300 text-sm">
-                Describe your symptoms or ask about your models and predictions
-              </p>
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-slate-300 text-sm">
+                  Ask your health-related questions. Each domain provides specialized responses.
+                </p>
+                {!showDomainSelector && (
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => setShowDomainSelector(true)}
+                    className="px-3 py-1.5 bg-slate-700/50 hover:bg-slate-600/50 text-slate-300 text-xs rounded-lg border border-slate-600/50 transition-all duration-200 backdrop-blur-md"
+                  >
+                    Change Domain
+                  </motion.button>
+                )}
+              </div>
+
+              {/* Domain Selection - Collapsible */}
+              <AnimatePresence>
+                {showDomainSelector && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="overflow-hidden mb-3"
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-2 mb-3">
+                      {domains.map((domain) => (
+                        <motion.button
+                          key={domain.id}
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => handleDomainSelect(domain.id)}
+                          className={`p-2 rounded-lg border-2 transition-all duration-200 backdrop-blur-md ${
+                            selectedDomain === domain.id
+                              ? "bg-blue-600/20 border-blue-400 text-blue-100 shadow-lg shadow-blue-900/30"
+                              : "bg-slate-800/40 border-slate-600/50 text-slate-300 hover:border-slate-500/70 hover:bg-slate-700/40"
+                          }`}
+                        >
+                          <div className="text-center">
+                            <div className="text-lg mb-1">{domain.icon}</div>
+                            <div className="font-medium text-xs mb-0.5">{domain.name}</div>
+                            <div className="text-xs opacity-70 leading-tight">{domain.description}</div>
+                          </div>
+                        </motion.button>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <div className="text-center">
+                <p className="text-slate-400 text-xs">
+                  Current domain: <span className="text-blue-400 font-medium">
+                    {domains.find(d => d.id === selectedDomain)?.name}
+                  </span>
+                </p>
+              </div>
             </div>
 
             {/* Chat area */}
@@ -173,7 +244,14 @@ function Chatbot({ workspaceId }) {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder="Ask me about your models, symptoms, or predictions..."
+                placeholder={
+                  selectedDomain === 'general' ? "Describe your symptoms (e.g., 'headache and fever for 2 days')..." :
+                  selectedDomain === 'diet' ? "Ask about diets (e.g., 'diet for diabetes' or 'healthy eating tips')..." :
+                  selectedDomain === 'workout' ? "Ask about exercises (e.g., 'safe workouts for arthritis')..." :
+                  selectedDomain === 'medications' ? "Ask about medicines (e.g., 'medicines for hypertension')..." :
+                  selectedDomain === 'precautions' ? "Ask about precautions (e.g., 'how to prevent flu')..." :
+                  "Ask your health question..."
+                }
                 className="flex-1 px-5 py-4 rounded-xl border border-slate-600/50 bg-slate-800/40 text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/50 backdrop-blur-md shadow-lg"
                 disabled={loading}
               />
