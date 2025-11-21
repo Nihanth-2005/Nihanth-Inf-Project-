@@ -192,14 +192,14 @@ const firebaseConfig = {
 │           └── Workspace.jsx
 ├── Images inf project/           # Project images and screenshots
 │   ├── 3. nlu evaluation.png
-│   ├── milestone1/
+│   ├── module1/
 │   │   ├── login architecture.png
 │   │   ├── Screenshot (323).png
 │   │   ├── Screenshot (324).png
 │   │   ├── Screenshot (325).png
 │   │   ├── Screenshot (326).png
 │   │   └── Screenshot (327).png
-│   ├── milestone2/
+│   ├── module2/
 │   │   ├── Screenshot (329).png
 │   │   ├── Screenshot (330).png
 │   │   ├── Screenshot (334).png
@@ -207,14 +207,14 @@ const firebaseConfig = {
 │   │   ├── Screenshot (336).png
 │   │   ├── Screenshot (337).png
 │   │   └── Screenshot (338).png
-│   ├── milestone3/
+│   ├── module3/
 │   │   ├── 3. nlu evaluation.png
 │   │   ├── Screenshot (339).png
 │   │   ├── Screenshot (341).png
 │   │   ├── Screenshot (342).png
 │   │   ├── Screenshot (343).png
 │   │   └── Screenshot (344).png
-│   └── milestone4/
+│   └── module4/
 │       ├── deployment_architecture_svg.png
 │       ├── Screenshot (345).png
 │       ├── Screenshot (346).png
