@@ -18,8 +18,9 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/workspace" element={<Workspace />} />
-          {/* Add other routes as needed */}
+          
+          {/* FIXED ROUTE */}
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
         </Routes>
       </div>
     </Router>

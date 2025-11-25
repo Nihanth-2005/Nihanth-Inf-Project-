@@ -380,7 +380,33 @@ def create_app():
 
     @app.route('/')
     def index():
-        return "Backend is working fine!"
+        return jsonify({
+            "message": "Welcome to the AI Health Assistant Backend API",
+            "status": "running",
+            "version": "1.0",
+            "endpoints": {
+                "GET /api/health": "Health check endpoint",
+                "POST /api/workspace/create": "Create a new workspace",
+                "POST /api/workspace/list": "List user workspaces",
+                "POST /api/workspace/delete": "Delete a workspace",
+                "POST /api/dataset/upload": "Upload and train on dataset",
+                "GET /api/progress/<workspace_id>": "Check training progress",
+                "POST /api/predict": "Make predictions with trained model",
+                "GET /api/report/download": "Download training report",
+                "POST /api/predict/download": "Download predictions",
+                "POST /api/model/info": "Get model information",
+                "GET /api/training/logs": "Get training logs",
+                "GET /api/datasets": "List uploaded datasets",
+                "GET /api/models": "List trained models",
+                "GET /api/dataset/insights": "Get dataset insights",
+                "GET /api/model/algorithms": "List available algorithms",
+                "GET /api/model/comparison": "Compare models",
+                "POST /api/feedback": "Submit feedback",
+                "GET /api/feedback": "List feedback",
+                "POST /api/chatbot": "Chatbot interaction",
+                "POST /api/rasa/parse": "Rasa NLU parsing"
+            }
+        })
 
     # Debug: list registered routes
     try:
