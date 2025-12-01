@@ -177,7 +177,7 @@ function ModelInfo({ workspaceId }) {
                 <p className="text-sm font-medium text-slate-300">Accuracy</p>
               </div>
               <p className="text-2xl font-bold text-purple-400">
-                {(modelInfo.accuracy * 100).toFixed(2)}%
+                {modelInfo.accuracy.toFixed(2)}%
               </p>
             </div>
           )}
@@ -243,8 +243,8 @@ function ModelInfo({ workspaceId }) {
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="name" stroke="#94a3b8" />
                   <YAxis
-                    domain={[0, 1]}
-                    tickFormatter={(v) => `${Math.round(v * 100)}%`}
+                    domain={[0, 100]}
+                    tickFormatter={(v) => `${Math.round(v)}%`}
                     stroke="#94a3b8"
                   />
                   <Tooltip
@@ -253,7 +253,7 @@ function ModelInfo({ workspaceId }) {
                       border: '1px solid #334155',
                       color: '#fff',
                     }}
-                    formatter={(v) => `${(v * 100).toFixed(2)}%`}
+                    formatter={(v) => `${v.toFixed(2)}%`}
                   />
                   <Line
                     type="monotone"
@@ -296,7 +296,7 @@ function ModelInfo({ workspaceId }) {
                       color: '#fff',
                     }}
                     formatter={(v, n, props) => [
-                      `${(v * 100).toFixed(2)}%`,
+                      `${v.toFixed(2)}%`,
                       props?.payload?.name,
                     ]}
                   />

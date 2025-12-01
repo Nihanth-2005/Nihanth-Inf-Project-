@@ -124,7 +124,7 @@ function ModelComparison({ workspaceId }) {
                     >
                       <td className="py-4 text-white font-medium">{model.algorithm}</td>
                       <td className="py-4 text-blue-400">
-                        {model.accuracy ? `${(model.accuracy * 100).toFixed(2)}%` : 'N/A'}
+                        {model.accuracy ? `${model.accuracy.toFixed(2)}%` : 'N/A'}
                       </td>
                       <td className="py-4 text-purple-400">
                         {model.f1_score ? model.f1_score.toFixed(3) : 'N/A'}

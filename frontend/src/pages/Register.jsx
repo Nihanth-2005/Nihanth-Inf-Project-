@@ -15,8 +15,38 @@ function Register() {
   const [loading, setLoading] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
   const [isUnlocking, setIsUnlocking] = useState(false);
+  const [errors, setErrors] = useState({});
+  const [passwordFocused, setPasswordFocused] = useState(false);
   const navigate = useNavigate();
   const { darkMode, toggleTheme } = useTheme();
+
+  const validateEmail = (email) => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) return false;
+    const allowedDomains = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'aol.com'];
+    const domain = email.split('@')[1];
+    return allowedDomains.includes(domain.toLowerCase());
+  };
+
+  const validatePassword = (password) => {
+    const minLength = password.length >= 6;
+    const hasLower = /[a-z]/.test(password);
+    const hasUpper = /[A-Z]/.test(password);
+    const hasNumber = /\d/.test(password);
+    const hasSymbol = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+    return { minLength, hasLower, hasUpper, hasNumber, hasSymbol };
+  };
+
+  const getPasswordStrength = (password) => {
+    const criteria = validatePassword(password);
+    const met = Object.values(criteria).filter(Boolean).length;
+    if (met === 0) return { level: 'Very Weak', color: 'bg-red-500', width: '20%' };
+    if (met === 1) return { level: 'Weak', color: 'bg-red-400', width: '30%' };
+    if (met === 2) return { level: 'Fair', color: 'bg-orange-500', width: '50%' };
+    if (met === 3) return { level: 'Good', color: 'bg-yellow-500', width: '70%' };
+    if (met === 4) return { level: 'Strong', color: 'bg-green-500', width: '90%' };
+    if (met === 5) return { level: 'Very Strong', color: 'bg-green-600', width: '100%' };
+  };
 
   const handleUnlock = () => {
     setIsUnlocking(true);
@@ -28,17 +58,28 @@ function Register() {
 
   const handleEmailRegister = async (e) => {
     e.preventDefault();
-    
+
+    const newErrors = {};
+
+    if (!validateEmail(email)) {
+      newErrors.email = 'Please enter a valid email address from a supported provider (Gmail, Yahoo, Outlook, etc.).';
+    }
+
+    const passwordCriteria = validatePassword(password);
+    if (!passwordCriteria.minLength || !passwordCriteria.hasLower || !passwordCriteria.hasUpper || !passwordCriteria.hasNumber || !passwordCriteria.hasSymbol) {
+      newErrors.password = 'Password must be at least 6 characters and include at least one lowercase letter, one uppercase letter, one number, and one symbol.';
+    }
+
     if (password !== confirmPassword) {
-      toast.error('Passwords do not match');
+      newErrors.confirmPassword = 'Passwords do not match.';
+    }
+
+    if (Object.keys(newErrors).length > 0) {
+      setErrors(newErrors);
       return;
     }
 
-    if (password.length < 6) {
-      toast.error('Password must be at least 6 characters');
-      return;
-    }
-
+    setErrors({});
     setLoading(true);
 
     try {
@@ -251,12 +292,13 @@ function Register() {
               <input
                 type="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => { setEmail(e.target.value); setErrors(prev => ({ ...prev, email: '' })); }}
                 className="w-full pl-10 pr-4 py-3 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
                 placeholder="your@email.com"
                 required
               />
             </div>
+            {errors.email && <p className="text-red-500 text-sm mt-1">{errors.email}</p>}
           </div>
 
           <div>
@@ -268,12 +310,26 @@ function Register() {
               <input
                 type="password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => { setPassword(e.target.value); setErrors(prev => ({ ...prev, password: '' })); }}
+                onFocus={() => setPasswordFocused(true)}
+                onBlur={() => setPasswordFocused(false)}
                 className="w-full pl-10 pr-4 py-3 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
                 placeholder="••••••••"
                 required
               />
             </div>
+            {(passwordFocused || password) && (
+              <div className="mt-2">
+                <div className="flex justify-between text-xs text-slate-500 mb-1">
+                  <span>Password Strength:</span>
+                  <span>{getPasswordStrength(password).level}</span>
+                </div>
+                <div className="w-full bg-slate-200 dark:bg-slate-600 rounded-full h-2">
+                  <div className={`h-2 rounded-full ${getPasswordStrength(password).color}`} style={{ width: getPasswordStrength(password).width }}></div>
+                </div>
+              </div>
+            )}
+            {errors.password && <p className="text-red-500 text-sm mt-1">{errors.password}</p>}
           </div>
 
           <div>
@@ -285,12 +341,13 @@ function Register() {
               <input
                 type="password"
                 value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
+                onChange={(e) => { setConfirmPassword(e.target.value); setErrors(prev => ({ ...prev, confirmPassword: '' })); }}
                 className="w-full pl-10 pr-4 py-3 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
                 placeholder="••••••••"
                 required
               />
             </div>
+            {errors.confirmPassword && <p className="text-red-500 text-sm mt-1">{errors.confirmPassword}</p>}
           </div>
 
           <motion.button
